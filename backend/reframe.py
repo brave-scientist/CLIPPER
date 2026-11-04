@@ -7,12 +7,10 @@ Uses OpenCV and MediaPipe for:
 4. Video rendering (with PIP circular face bubble and split screen dividers) and audio muxing.
 """
 
-import os
-import json
 import math
 import subprocess
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple
 
 import cv2
 import numpy as np
@@ -185,7 +183,6 @@ def sample_clip_faces(
 
     w_orig = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h_orig = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps_orig = cap.get(cv2.CAP_PROP_FPS) or 30.0
 
     target_h = 360
     scale = target_h / float(h_orig) if h_orig > target_h else 1.0

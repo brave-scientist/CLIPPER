@@ -10,9 +10,8 @@ Thumbnail Generator module for ClipSnap.
 
 import os
 import json
-import math
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Optional
 
 import cv2
 import numpy as np

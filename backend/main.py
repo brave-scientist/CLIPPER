@@ -10,7 +10,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional, Literal, Dict, Any
+from typing import List, Optional, Literal, Dict, Any, Tuple
+
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 
 # Ensure backend directory is in sys.path for local module imports
 BACKEND_DIR = Path(__file__).resolve().parent
@@ -18,7 +23,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, HTTPException, status, Request, Response, Query
+from fastapi import FastAPI, UploadFile, File, HTTPException, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -714,7 +719,7 @@ async def import_file(file: UploadFile = File(...)):
         recv_time = time.time() - t_recv
 
         t_probe = time.time()
-        print(f"[import-file] Step 2: Measuring source duration & probing codecs via ffprobe...")
+        print("[import-file] Step 2: Measuring source duration & probing codecs via ffprobe...")
         source_duration = get_video_duration(temp_upload_path)
         codecs = probe_video_codecs(temp_upload_path)
         vcodec, acodec = codecs.get("vcodec", ""), codecs.get("acodec", "")
@@ -743,7 +748,7 @@ async def import_file(file: UploadFile = File(...)):
         def process_video_task():
             t_proc = time.time()
             if is_h264 and is_aac:
-                print(f"[import-file] Step 3a: Fast REMUXING H.264 + AAC video in seconds (-c copy)...")
+                print("[import-file] Step 3a: Fast REMUXING H.264 + AAC video in seconds (-c copy)...")
                 remux_cmd = [
                     "ffmpeg", "-y", "-nostdin",
                     "-i", str(temp_upload_path),
@@ -776,10 +781,10 @@ async def import_file(file: UploadFile = File(...)):
             return decision, time.time() - t_proc
 
         def process_audio_task():
-            print(f"[import-file] Step 3b: Extracting mono 16 kHz audio concurrently...")
+            print("[import-file] Step 3b: Extracting mono 16 kHz audio concurrently...")
             return extract_audio_wav(temp_upload_path, wav_path)
 
-        print(f"[import-file] Step 3: Running video remux/encode and audio extraction concurrently...")
+        print("[import-file] Step 3: Running video remux/encode and audio extraction concurrently...")
         input_file_size = temp_upload_path.stat().st_size if temp_upload_path.exists() else 0
         with ThreadPoolExecutor(max_workers=2) as executor:
             fut_video = executor.submit(process_video_task)
@@ -788,7 +793,7 @@ async def import_file(file: UploadFile = File(...)):
             used_action, process_time = fut_video.result()
             audio_time, audio_file_size, audio_cmd_str = fut_audio.result()
 
-        print(f"[import-file] Step 4: Verifying final file duration with ffprobe...")
+        print("[import-file] Step 4: Verifying final file duration with ffprobe...")
         final_duration = get_video_duration(dest_path)
         if source_duration > 0 and final_duration < (0.95 * source_duration):
             if dest_path.exists():
@@ -891,7 +896,7 @@ def import_url(payload: ImportUrlRequest):
                     detail="This video is too long (> 90 minutes). Please choose a shorter video."
                 )
 
-        print(f"[import-url] Step 2: Downloading <=720p video (H.264+AAC preferred, 4 concurrent fragments)...")
+        print("[import-url] Step 2: Downloading <=720p video (H.264+AAC preferred, 4 concurrent fragments)...")
         download_opts = {
             "format": "bv*[height<=720][vcodec^=avc1]+ba[acodec^=mp4a]/b[height<=720][vcodec^=avc1][acodec^=mp4a]/bv*[height<=720]+ba/b[height<=720]",
             "concurrent_fragment_downloads": 4,
@@ -913,7 +918,7 @@ def import_url(payload: ImportUrlRequest):
         input_file_size = raw_download_path.stat().st_size if raw_download_path.exists() else 0
 
         t_probe = time.time()
-        print(f"[import-url] Step 3: Measuring source duration & probing codecs via ffprobe...")
+        print("[import-url] Step 3: Measuring source duration & probing codecs via ffprobe...")
         codecs = probe_video_codecs(raw_download_path)
         vcodec, acodec = codecs.get("vcodec", ""), codecs.get("acodec", "")
         probe_time = time.time() - t_probe
@@ -941,7 +946,7 @@ def import_url(payload: ImportUrlRequest):
         def process_video_task():
             t_proc = time.time()
             if is_h264 and is_aac:
-                print(f"[import-url] Step 4a: Fast REMUXING H.264 + AAC video in seconds (-c copy)...")
+                print("[import-url] Step 4a: Fast REMUXING H.264 + AAC video in seconds (-c copy)...")
                 remux_cmd = [
                     "ffmpeg", "-y", "-nostdin",
                     "-i", str(raw_download_path),
@@ -974,10 +979,10 @@ def import_url(payload: ImportUrlRequest):
             return decision, time.time() - t_proc
 
         def process_audio_task():
-            print(f"[import-url] Step 4b: Extracting mono 16 kHz audio concurrently...")
+            print("[import-url] Step 4b: Extracting mono 16 kHz audio concurrently...")
             return extract_audio_wav(raw_download_path, wav_path)
 
-        print(f"[import-url] Step 4: Running video remux/encode and audio extraction concurrently...")
+        print("[import-url] Step 4: Running video remux/encode and audio extraction concurrently...")
         with ThreadPoolExecutor(max_workers=2) as executor:
             fut_video = executor.submit(process_video_task)
             fut_audio = executor.submit(process_audio_task)
@@ -985,7 +990,7 @@ def import_url(payload: ImportUrlRequest):
             used_action, process_time = fut_video.result()
             audio_time, audio_file_size, audio_cmd_str = fut_audio.result()
 
-        print(f"[import-url] Step 5: Verifying final file duration with ffprobe...")
+        print("[import-url] Step 5: Verifying final file duration with ffprobe...")
         final_duration = get_video_duration(dest_path)
         if source_duration > 0 and final_duration < (0.95 * source_duration):
             if dest_path.exists():
@@ -1922,7 +1927,7 @@ def generate_thumbnails(payload: ThumbnailsRequest):
     chosen_frames = pick_top_diverse_frames(scored_frames, count=3)
 
     # Fallback if too few samples were returned
-    if len(chosen_frames) < 3:
+    if len(chosen_frames) < 3 and cv2 is not None:
         cap = cv2.VideoCapture(str(video_path))
         if cap.isOpened():
             mid = (payload.clip.start + payload.clip.end) / 2.0

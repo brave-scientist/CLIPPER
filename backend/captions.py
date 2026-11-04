@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 
 # Style definitions dictionary - easily extendable with new subtitle styles
 CAPTION_STYLES: Dict[str, Dict[str, Any]] = {
