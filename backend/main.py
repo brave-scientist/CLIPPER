@@ -1043,27 +1043,6 @@ def import_url(payload: ImportUrlRequest):
                 raw_download_path.unlink()
             except Exception:
                 pass
-    except HTTPException as he:
-        if dest_path.exists():
-            dest_path.unlink()
-        log_test_step("import-url", time.time() - t0, None, "error", str(he.detail))
-        raise
-    except Exception as e:
-        if dest_path.exists():
-            dest_path.unlink()
-        elapsed = time.time() - t0
-        log_test_step("import-url", elapsed, None, "error", str(e))
-        print(f"[import-url] Download/processing error: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to download and process video: {str(e)}"
-        )
-    finally:
-        if raw_download_path.exists():
-            try:
-                raw_download_path.unlink()
-            except Exception:
-                pass
 
 
 @app.get("/video/{video_id}")
