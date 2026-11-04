@@ -1,0 +1,8 @@
+{
+  "name": "ClipSnap - AI Video Clipper",
+  "description": "Turn long videos into viral short vertical clips with AI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
