@@ -52,6 +52,18 @@ def find_system_bold_font(font_size: int = 90) -> ImageFont.ImageFont:
         return ImageFont.load_default()
 
 
+def get_gemini_http_options(timeout_ms: int = 30000) -> Optional[types.HttpOptions]:
+    try:
+        if hasattr(types, "HttpRetryOptions"):
+            return types.HttpOptions(timeout=timeout_ms, retry_options=types.HttpRetryOptions(attempts=1))
+        return types.HttpOptions(timeout=timeout_ms)
+    except Exception:
+        try:
+            return types.HttpOptions(timeout=timeout_ms)
+        except Exception:
+            return None
+
+
 def generate_punchy_text_hooks_gemini(clip_title: str, transcript_snippet: str) -> List[str]:
     """Ask Gemini for 3 distinct 2-4 word punchy overlay text hooks."""
     fallback_hooks = ["WAIT FOR IT", "DON'T MISS THIS", "THE SECRET"]
@@ -59,7 +71,8 @@ def generate_punchy_text_hooks_gemini(clip_title: str, transcript_snippet: str) 
         return fallback_hooks
 
     try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
+        http_opts = get_gemini_http_options(timeout_ms=30000)
+        client = genai.Client(api_key=GEMINI_API_KEY, http_options=http_opts) if http_opts else genai.Client(api_key=GEMINI_API_KEY)
         prompt = (
             f"Clip title: {clip_title}\n"
             f"Transcript snippet: {transcript_snippet[:400]}\n\n"

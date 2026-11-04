@@ -194,6 +194,87 @@ app.add_middleware(
 # ==========================================
 
 _SELECTED_VIDEO_ENCODER: Optional[str] = None
+_GEMINI_STARTUP_STATUS: Dict[str, Any] = {
+    "status": "pending",
+    "details": "Startup test not run yet"
+}
+
+
+@app.on_event("startup")
+def startup_event():
+    """Run hardware encoder detection and Gemini self-test on app startup."""
+    try:
+        detect_best_video_encoder()
+    except Exception as e:
+        print(f"[Startup] Encoder detection error: {e}")
+    try:
+        run_gemini_startup_test()
+    except Exception as e:
+        print(f"[Startup] Gemini self-test error: {e}")
+
+
+
+def get_gemini_http_options(timeout_ms: int = 60000) -> Optional[types.HttpOptions]:
+    """
+    Construct HttpOptions disabling hidden SDK retries.
+    Uses HttpOptions(timeout=timeout_ms, retry_options=types.HttpRetryOptions(attempts=1)),
+    or falls back to HttpOptions(timeout=timeout_ms) if retry_options is rejected.
+    """
+    try:
+        if hasattr(types, "HttpRetryOptions"):
+            return types.HttpOptions(timeout=timeout_ms, retry_options=types.HttpRetryOptions(attempts=1))
+        return types.HttpOptions(timeout=timeout_ms)
+    except Exception:
+        try:
+            return types.HttpOptions(timeout=timeout_ms)
+        except Exception:
+            return None
+
+
+def run_gemini_startup_test():
+    """Run a tiny startup self-test call with Gemini and store status for /diagnostics."""
+    global _GEMINI_STARTUP_STATUS
+    if not GEMINI_API_KEY or GEMINI_API_KEY in ("YOUR_GEMINI_API_KEY_HERE", "MY_GEMINI_API_KEY"):
+        _GEMINI_STARTUP_STATUS = {
+            "status": "error",
+            "details": "GEMINI_API_KEY not configured"
+        }
+        print("[Gemini Startup Test] GEMINI_API_KEY not configured.")
+        return
+
+    t0 = time.time()
+    cleaned_model = clean_model_name(GEMINI_MODEL) or "gemini-2.5-flash"
+    try:
+        http_opts = get_gemini_http_options(timeout_ms=10000)
+        client = genai.Client(api_key=GEMINI_API_KEY, http_options=http_opts) if http_opts else genai.Client(api_key=GEMINI_API_KEY)
+        res = client.models.generate_content(
+            model=cleaned_model,
+            contents="Say hi in 1 word.",
+            config=types.GenerateContentConfig(temperature=0.1)
+        )
+        duration = time.time() - t0
+        if res and res.text:
+            msg = f"Gemini OK ({cleaned_model}, {duration:.2f}s)"
+            _GEMINI_STARTUP_STATUS = {
+                "status": "ok",
+                "details": msg,
+                "model": cleaned_model,
+                "duration_sec": round(duration, 2)
+            }
+            print(f"[Gemini Startup Test] {msg}")
+        else:
+            raise ValueError("Empty response from Gemini")
+    except Exception as e:
+        duration = time.time() - t0
+        err_msg = str(e)
+        _GEMINI_STARTUP_STATUS = {
+            "status": "error",
+            "details": f"Gemini Error ({cleaned_model}): {err_msg}",
+            "model": cleaned_model,
+            "duration_sec": round(duration, 2)
+        }
+        print(f"[Gemini Startup Test Error] {err_msg}")
+
 
 def detect_best_video_encoder() -> str:
     """
@@ -229,14 +310,14 @@ def detect_best_video_encoder() -> str:
 
 
 def get_encoder_args(crf: int = 24) -> List[str]:
-    """Return optimal FFmpeg encoder flags for detected hardware/software encoder."""
+    """Return optimal FFmpeg encoder flags with strict quality targets to keep files small."""
     enc = detect_best_video_encoder()
     if enc == "h264_nvenc":
-        return ["-c:v", "h264_nvenc", "-preset", "p2", "-cq", str(crf)]
+        return ["-c:v", "h264_nvenc", "-cq", "28", "-preset", "veryfast"]
     elif enc == "h264_qsv":
-        return ["-c:v", "h264_qsv", "-preset", "veryfast", "-global_quality", str(crf)]
+        return ["-c:v", "h264_qsv", "-global_quality", "26", "-look_ahead", "0", "-preset", "veryfast"]
     elif enc == "h264_amf":
-        return ["-c:v", "h264_amf", "-quality", "speed", "-rc", "cqp", "-qp_p", str(crf)]
+        return ["-c:v", "h264_amf", "-quality", "balanced", "-rc", "cqp", "-qp_i", "26", "-qp_p", "28"]
     else:
         return ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf)]
 
@@ -260,7 +341,7 @@ def probe_video_codecs(file_path: Path) -> Dict[str, str]:
             a_codec = res_a.stdout.strip().lower()
     except Exception as e:
         print(f"[ffprobe probe error]: {e}")
-    return {"video": v_codec, "audio": a_codec}
+    return {"vcodec": v_codec, "acodec": a_codec, "video": v_codec, "audio": a_codec}
 
 
 def get_whisper_model() -> WhisperModel:
@@ -647,11 +728,22 @@ async def import_file(file: UploadFile = File(...)):
 
         used_encoder = detect_best_video_encoder()
 
+        is_h264 = ("h264" in vcodec.lower() or "avc1" in vcodec.lower())
+        is_aac = ("aac" in acodec.lower() or "mp4a" in acodec.lower())
+
+        if is_h264 and is_aac:
+            decision = "remux"
+            decision_reason = f"video is H.264 ({vcodec}) and audio is AAC ({acodec})"
+        else:
+            decision = f"re-encode ({used_encoder})"
+            decision_reason = f"codecs video={vcodec}, audio={acodec} require conversion to H.264/AAC"
+
+        print(f"[import-file] Codecs found: video='{vcodec}', audio='{acodec}'. Decision: {decision} ({decision_reason})")
+
         def process_video_task():
             t_proc = time.time()
-            if vcodec == "h264" and acodec == "aac":
+            if is_h264 and is_aac:
                 print(f"[import-file] Step 3a: Fast REMUXING H.264 + AAC video in seconds (-c copy)...")
-                action = "remux"
                 remux_cmd = [
                     "ffmpeg", "-y", "-nostdin",
                     "-i", str(temp_upload_path),
@@ -665,7 +757,6 @@ async def import_file(file: UploadFile = File(...)):
                     raise RuntimeError(f"FFmpeg remuxing failed: {res.stderr[-300:] if res.stderr else 'unknown error'}")
             else:
                 print(f"[import-file] Step 3a: Re-encoding video with '{used_encoder}' scaled to max 720p height...")
-                action = f"encode ({used_encoder})"
                 enc_args = get_encoder_args(crf=24)
                 reencode_cmd = [
                     "ffmpeg", "-y", "-nostdin",
@@ -682,13 +773,14 @@ async def import_file(file: UploadFile = File(...)):
                 if res.returncode != 0 or not dest_path.exists():
                     print(f"[import-file] FFmpeg re-encode failed: {res.stderr}")
                     raise RuntimeError(f"FFmpeg re-encoding failed: {res.stderr[-300:] if res.stderr else 'unknown error'}")
-            return action, time.time() - t_proc
+            return decision, time.time() - t_proc
 
         def process_audio_task():
             print(f"[import-file] Step 3b: Extracting mono 16 kHz audio concurrently...")
             return extract_audio_wav(temp_upload_path, wav_path)
 
         print(f"[import-file] Step 3: Running video remux/encode and audio extraction concurrently...")
+        input_file_size = temp_upload_path.stat().st_size if temp_upload_path.exists() else 0
         with ThreadPoolExecutor(max_workers=2) as executor:
             fut_video = executor.submit(process_video_task)
             fut_audio = executor.submit(process_audio_task)
@@ -719,10 +811,11 @@ async def import_file(file: UploadFile = File(...)):
         file_size = dest_path.stat().st_size if dest_path.exists() else None
         elapsed = time.time() - t0
         details = (
-            f"Uploaded: {filename} ({final_duration:.1f}s) | "
-            f"receive: {recv_time:.2f}s, probe: {probe_time:.2f}s, "
-            f"{used_action}: {process_time:.2f}s | "
-            f"audio_cmd: '{audio_cmd_str}', audio_duration: {audio_time:.2f}s, audio_size: {audio_file_size} bytes"
+            f"Uploaded: {filename} ({final_duration:.1f}s) | Codecs found: video={vcodec}, audio={acodec} | "
+            f"Decision: {decision} ({decision_reason}) | "
+            f"Input size: {format_bytes(input_file_size)} ({input_file_size} B), Output size: {format_bytes(file_size)} ({file_size} B) | "
+            f"Timings -> receive: {recv_time:.2f}s, probe: {probe_time:.2f}s, {decision}: {process_time:.2f}s, audio_extract: {audio_time:.2f}s | "
+            f"Audio extract WAV size: {format_bytes(audio_file_size)}"
         )
         log_test_step("import-file", elapsed, file_size, "ok", details)
 
@@ -800,7 +893,7 @@ def import_url(payload: ImportUrlRequest):
 
         print(f"[import-url] Step 2: Downloading <=720p video (H.264+AAC preferred, 4 concurrent fragments)...")
         download_opts = {
-            "format": "bv*[height<=720][vcodec^=avc1]+ba[ext=m4a]/b[height<=720][ext=mp4]/b[height<=720]",
+            "format": "bv*[height<=720][vcodec^=avc1]+ba[acodec^=mp4a]/b[height<=720][vcodec^=avc1][acodec^=mp4a]/bv*[height<=720]+ba/b[height<=720]",
             "concurrent_fragment_downloads": 4,
             "outtmpl": str(raw_download_path),
             "merge_output_format": "mp4",
@@ -817,6 +910,7 @@ def import_url(payload: ImportUrlRequest):
                 detail="Downloaded video file could not be found."
             )
         download_time = time.time() - t_dl_meta
+        input_file_size = raw_download_path.stat().st_size if raw_download_path.exists() else 0
 
         t_probe = time.time()
         print(f"[import-url] Step 3: Measuring source duration & probing codecs via ffprobe...")
@@ -832,11 +926,22 @@ def import_url(payload: ImportUrlRequest):
 
         used_encoder = detect_best_video_encoder()
 
+        is_h264 = ("h264" in vcodec.lower() or "avc1" in vcodec.lower())
+        is_aac = ("aac" in acodec.lower() or "mp4a" in acodec.lower())
+
+        if is_h264 and is_aac:
+            decision = "remux"
+            decision_reason = f"video is H.264 ({vcodec}) and audio is AAC ({acodec})"
+        else:
+            decision = f"re-encode ({used_encoder})"
+            decision_reason = f"codecs video={vcodec}, audio={acodec} require conversion to H.264/AAC"
+
+        print(f"[import-url] Codecs found: video='{vcodec}', audio='{acodec}'. Decision: {decision} ({decision_reason})")
+
         def process_video_task():
             t_proc = time.time()
-            if vcodec == "h264" and acodec == "aac":
+            if is_h264 and is_aac:
                 print(f"[import-url] Step 4a: Fast REMUXING H.264 + AAC video in seconds (-c copy)...")
-                action = "remux"
                 remux_cmd = [
                     "ffmpeg", "-y", "-nostdin",
                     "-i", str(raw_download_path),
@@ -850,7 +955,6 @@ def import_url(payload: ImportUrlRequest):
                     raise RuntimeError(f"FFmpeg remuxing failed: {res.stderr[-300:] if res.stderr else 'unknown error'}")
             else:
                 print(f"[import-url] Step 4a: Re-encoding video with '{used_encoder}' scaled to max 720p height...")
-                action = f"encode ({used_encoder})"
                 enc_args = get_encoder_args(crf=24)
                 reencode_cmd = [
                     "ffmpeg", "-y", "-nostdin",
@@ -867,7 +971,7 @@ def import_url(payload: ImportUrlRequest):
                 if res.returncode != 0 or not dest_path.exists():
                     print(f"[import-url] FFmpeg re-encode failed: {res.stderr}")
                     raise RuntimeError(f"FFmpeg re-encoding failed: {res.stderr[-300:] if res.stderr else 'unknown error'}")
-            return action, time.time() - t_proc
+            return decision, time.time() - t_proc
 
         def process_audio_task():
             print(f"[import-url] Step 4b: Extracting mono 16 kHz audio concurrently...")
@@ -904,10 +1008,11 @@ def import_url(payload: ImportUrlRequest):
         file_size = dest_path.stat().st_size if dest_path.exists() else None
         elapsed = time.time() - t0
         details = (
-            f"URL video: {title[:40]} ({final_duration:.1f}s) | "
-            f"download: {download_time:.2f}s, probe: {probe_time:.2f}s, "
-            f"{used_action}: {process_time:.2f}s | "
-            f"audio_cmd: '{audio_cmd_str}', audio_duration: {audio_time:.2f}s, audio_size: {audio_file_size} bytes"
+            f"URL video: {title[:40]} ({final_duration:.1f}s) | Codecs found: video={vcodec}, audio={acodec} | "
+            f"Decision: {decision} ({decision_reason}) | "
+            f"Input size: {format_bytes(input_file_size)} ({input_file_size} B), Output size: {format_bytes(file_size)} ({file_size} B) | "
+            f"Timings -> download: {download_time:.2f}s, probe: {probe_time:.2f}s, {decision}: {process_time:.2f}s, audio_extract: {audio_time:.2f}s | "
+            f"Audio extract WAV size: {format_bytes(audio_file_size)}"
         )
         log_test_step("import-url", elapsed, file_size, "ok", details)
 
@@ -1294,12 +1399,8 @@ def find_highlights(payload: HighlightsRequest):
 
     # Helper function for single Gemini attempt with 60s hard timeout and budget=0
     def single_gemini_attempt(model_name: str) -> GeminiClipsOutput:
-        try:
-            http_opts = types.HttpOptions(timeout=60000, num_retries=0)
-        except Exception:
-            http_opts = {"timeout": 60000, "num_retries": 0}
-
-        client = genai.Client(api_key=GEMINI_API_KEY, http_options=http_opts)
+        http_opts = get_gemini_http_options(timeout_ms=60000)
+        client = genai.Client(api_key=GEMINI_API_KEY, http_options=http_opts) if http_opts else genai.Client(api_key=GEMINI_API_KEY)
 
         thinking_cfg = None
         if hasattr(types, "ThinkingConfig"):
@@ -1762,7 +1863,8 @@ def generate_metadata(payload: MetadataRequest):
         )
 
     try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
+        http_opts = get_gemini_http_options(timeout_ms=30000)
+        client = genai.Client(api_key=GEMINI_API_KEY, http_options=http_opts) if http_opts else genai.Client(api_key=GEMINI_API_KEY)
         full_prompt = (
             f"{base_prompt}\n\n"
             f"Clip Title: {payload.clip.title}\n"
@@ -2031,6 +2133,7 @@ def get_diagnostics():
         },
         "gemini_api_key_set": gemini_key_set,
         "gemini_model": GEMINI_MODEL,
+        "gemini_startup_status": _GEMINI_STARTUP_STATUS,
         "video_encoder": detect_best_video_encoder(),
         "free_disk_space": free_disk_space,
         "whisper_model": WHISPER_MODEL_NAME,

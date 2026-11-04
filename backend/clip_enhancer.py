@@ -275,13 +275,26 @@ def apply_background_music(
     return res.returncode == 0
 
 
+def get_gemini_http_options(timeout_ms: int = 30000) -> Optional[types.HttpOptions]:
+    try:
+        if hasattr(types, "HttpRetryOptions"):
+            return types.HttpOptions(timeout=timeout_ms, retry_options=types.HttpRetryOptions(attempts=1))
+        return types.HttpOptions(timeout=timeout_ms)
+    except Exception:
+        try:
+            return types.HttpOptions(timeout=timeout_ms)
+        except Exception:
+            return None
+
+
 def detect_sfx_moments_gemini(transcript_text: str, duration: float) -> List[Dict[str, Any]]:
     """Ask Gemini to pinpoint up to 3 key punchy moments for SFX (whoosh, pop, ding)."""
     if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY_HERE":
         return []
 
     try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
+        http_opts = get_gemini_http_options(timeout_ms=30000)
+        client = genai.Client(api_key=GEMINI_API_KEY, http_options=http_opts) if http_opts else genai.Client(api_key=GEMINI_API_KEY)
         prompt = (
             f"Given this video transcript with duration {duration:.1f}s:\n"
             f"{transcript_text}\n\n"
@@ -364,7 +377,8 @@ def pick_broll_cues_gemini(transcript_text: str, duration: float) -> List[Dict[s
         return []
 
     try:
-        client = genai.Client(api_key=GEMINI_API_KEY)
+        http_opts = get_gemini_http_options(timeout_ms=30000)
+        client = genai.Client(api_key=GEMINI_API_KEY, http_options=http_opts) if http_opts else genai.Client(api_key=GEMINI_API_KEY)
         prompt = (
             f"Given this transcript of a {duration:.1f}s video:\n"
             f"{transcript_text}\n\n"
